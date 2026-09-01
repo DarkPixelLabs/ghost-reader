@@ -136,6 +136,13 @@ async function scanImage() {
   }
 }
 
+window.addEventListener("ghostreader:ocr-complete", (event) => {
+  if (!window.GhostReaderDetectors) return;
+  state.findings = window.GhostReaderDetectors.detectSensitiveInfo(event.detail.text || "");
+  status.textContent = `${state.findings.length} potential leak${state.findings.length === 1 ? "" : "s"} detected. Review the findings below.`;
+  window.dispatchEvent(new CustomEvent("ghostreader:detections-complete", { detail: state.findings }));
+});
+
 chooseBtn.addEventListener("click", (event) => {
   event.stopPropagation();
   fileInput.click();
