@@ -96,6 +96,41 @@ function setProgress(value, label) {
   progressText.textContent = label;
 }
 
+function mapDetectionsToWordBoxes(ocrData, findings) {
+  const text = ocrData?.text || "";
+  const words = Array.isArray(ocrData?.words) ? ocrData.words : [];
+  const spans = [];
+  let cursor = 0;
+
+  for (const word of words) {
+    const value = String(word.text || "").trim();
+    if (!value) continue;
+    const lowerText = text.toLowerCase();
+    const lowerValue = value.toLowerCase();
+    let start = lowerText.indexOf(lowerValue, cursor);
+
+    if (start < 0) {
+      const compactText = text.replace(/\s+/g, " ").toLowerCase();
+      const compactValue = value.replace(/\s+/g, " ").toLowerCase();
+      const compactStart = compactText.indexOf(compactValue);
+      if (compactStart >= 0) start = compactStart;
+    }
+
+    if (start < 0) continue;
+    const end = start + value.length;
+    spans.push({ start, end, bbox: word.bbox, text: value, confidence: word.confidence });
+    cursor = end;
+  }
+
+  return findings.map((finding) => {
+    const matchedWords = spans.filter((span) => span.start < finding.end && span.end > finding.start);
+    return {
+      ...finding,
+      boxes: matchedWords.map((word) => word.bbox).filter(Boolean)
+    };
+  });
+}
+
 async function scanImage() {
   if (!state.originalImage) return;
 
@@ -138,7 +173,8 @@ async function scanImage() {
 
 window.addEventListener("ghostreader:ocr-complete", (event) => {
   if (!window.GhostReaderDetectors) return;
-  state.findings = window.GhostReaderDetectors.detectSensitiveInfo(event.detail.text || "");
+  const detections = window.GhostReaderDetectors.detectSensitiveInfo(event.detail.text || "");
+  state.findings = mapDetectionsToWordBoxes(event.detail, detections);
   status.textContent = `${state.findings.length} potential leak${state.findings.length === 1 ? "" : "s"} detected. Review the findings below.`;
   window.dispatchEvent(new CustomEvent("ghostreader:detections-complete", { detail: state.findings }));
 });
