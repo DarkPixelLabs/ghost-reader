@@ -142,7 +142,7 @@ function detectSensitiveInfo(text) {
 function runDetectorSelfTest() {
   const sample = [
     "Email test@example.com",
-    "Phone +91 98765 43210",
+    "Phone +1 415 555 2671",
     "Secret sk-abcd1234efgh5678ijkl",
     "IP 192.168.1.42",
     "Card 4539 1488 0343 6467",
