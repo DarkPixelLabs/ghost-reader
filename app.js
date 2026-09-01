@@ -19,14 +19,17 @@ const results = document.getElementById("results");
 const resultsList = document.getElementById("resultsList");
 const emptyState = document.getElementById("emptyState");
 const redactBtn = document.getElementById("redactBtn");
+const downloadBtn = document.getElementById("downloadBtn");
 
 const state = window.ghostReader = window.ghostReader || {
   originalImage: null,
   currentObjectUrl: null,
   ocrData: null,
   findings: [],
+  selectedFindings: [],
   imageName: "",
-  redactionApplied: false
+  redactionApplied: false,
+  highlightTimer: null
 };
 
 function showError(message) {
@@ -41,12 +44,8 @@ function clearError() {
 
 function validateFile(file) {
   if (!file) return "Choose an image file to continue.";
-  if (!ALLOWED_TYPES.has(file.type)) {
-    return "Unsupported image type. Use PNG, JPG, JPEG, or WebP.";
-  }
-  if (file.size > MAX_FILE_BYTES) {
-    return "Image is too large. Please choose a file up to 15 MB.";
-  }
+  if (!ALLOWED_TYPES.has(file.type)) return "Unsupported image type. Use PNG, JPG, JPEG, or WebP.";
+  if (file.size > MAX_FILE_BYTES) return "Image is too large. Please choose a file up to 15 MB.";
   return "";
 }
 
@@ -64,9 +63,32 @@ function drawImage(image) {
   canvasPlaceholder.hidden = true;
 }
 
+function drawRedactions(findings) {
+  if (!state.originalImage) return;
+  drawImage(state.originalImage);
+  const scaleX = canvas.width / state.originalImage.naturalWidth;
+  const scaleY = canvas.height / state.originalImage.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#050505";
+
+  for (const finding of findings) {
+    for (const box of finding.boxes || []) {
+      const paddingX = Math.max(3, 4 * scaleX);
+      const paddingY = Math.max(2, 3 * scaleY);
+      const x = Math.max(0, box.x0 * scaleX - paddingX);
+      const y = Math.max(0, box.y0 * scaleY - paddingY);
+      const right = Math.min(canvas.width, box.x1 * scaleX + paddingX);
+      const bottom = Math.min(canvas.height, box.y1 * scaleY + paddingY);
+      ctx.fillRect(x, y, right - x, bottom - y);
+    }
+  }
+}
+
 function highlightFinding(finding) {
   if (!state.originalImage || !finding?.boxes?.length) return;
+  window.clearTimeout(state.highlightTimer);
   drawImage(state.originalImage);
+
   const scaleX = canvas.width / state.originalImage.naturalWidth;
   const scaleY = canvas.height / state.originalImage.naturalHeight;
   const ctx = canvas.getContext("2d");
@@ -81,18 +103,21 @@ function highlightFinding(finding) {
     ctx.fillRect(x, y, width, height);
     ctx.strokeRect(x, y, width, height);
   }
-  window.clearTimeout(state.highlightTimer);
-  state.highlightTimer = window.setTimeout(() => drawImage(state.originalImage), 1400);
+
+  state.highlightTimer = window.setTimeout(() => {
+    if (state.redactionApplied) drawRedactions(state.selectedFindings);
+    else drawImage(state.originalImage);
+  }, 1400);
 }
 
 function truncateMatch(value, maxLength = 64) {
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength - 1)}…`;
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
 }
 
 function renderResults() {
   results.hidden = false;
   resultsList.replaceChildren();
+  downloadBtn.hidden = !state.redactionApplied;
 
   if (!state.findings.length) {
     emptyState.hidden = false;
@@ -103,28 +128,27 @@ function renderResults() {
   emptyState.hidden = true;
   redactBtn.disabled = false;
   const groups = new Map();
-  for (const finding of state.findings) {
+  state.findings.forEach((finding, index) => {
     if (!groups.has(finding.type)) groups.set(finding.type, []);
-    groups.get(finding.type).push(finding);
-  }
+    groups.get(finding.type).push({ finding, index });
+  });
 
-  let findingIndex = 0;
-  for (const [type, findings] of groups) {
+  for (const [, entries] of groups) {
     const group = document.createElement("section");
     group.className = "finding-group";
     const heading = document.createElement("h3");
-    heading.textContent = `${findings[0].label} · ${findings.length}`;
+    heading.textContent = `${entries[0].finding.label} · ${entries.length}`;
     group.appendChild(heading);
 
-    for (const finding of findings) {
+    for (const { finding, index } of entries) {
       const row = document.createElement("div");
       row.className = "finding";
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = true;
-      checkbox.id = `finding-${findingIndex}`;
-      checkbox.dataset.findingIndex = String(state.findings.indexOf(finding));
+      checkbox.id = `finding-${index}`;
+      checkbox.dataset.findingIndex = String(index);
       checkbox.setAttribute("aria-label", `Redact ${finding.label}: ${finding.text}`);
 
       const label = document.createElement("label");
@@ -141,10 +165,15 @@ function renderResults() {
 
       row.append(checkbox, label, locate);
       group.appendChild(row);
-      findingIndex += 1;
     }
     resultsList.appendChild(group);
   }
+}
+
+function getCheckedFindings() {
+  return [...resultsList.querySelectorAll("input[type=checkbox]:checked")]
+    .map((input) => state.findings[Number(input.dataset.findingIndex)])
+    .filter(Boolean);
 }
 
 function setProgress(value, label) {
@@ -166,14 +195,12 @@ function mapDetectionsToWordBoxes(ocrData, findings) {
     if (!value) continue;
     const lowerValue = value.toLowerCase();
     let start = lowerText.indexOf(lowerValue, cursor);
-
     if (start < 0) {
       const compactText = text.replace(/\s+/g, " ").toLowerCase();
       const compactValue = value.replace(/\s+/g, " ").toLowerCase();
       const compactStart = compactText.indexOf(compactValue);
       if (compactStart >= 0) start = compactStart;
     }
-
     if (start < 0) continue;
     const end = start + value.length;
     spans.push({ start, end, bbox: word.bbox, text: value, confidence: word.confidence });
@@ -186,13 +213,79 @@ function mapDetectionsToWordBoxes(ocrData, findings) {
   }));
 }
 
+function redactSelected() {
+  if (!state.originalImage) return;
+  const selected = getCheckedFindings();
+  state.selectedFindings = selected;
+  state.redactionApplied = true;
+  window.clearTimeout(state.highlightTimer);
+  drawRedactions(selected);
+  downloadBtn.hidden = false;
+  status.textContent = selected.length
+    ? `${selected.length} finding${selected.length === 1 ? "" : "s"} redacted. The original remains available for re-redaction.`
+    : "No findings selected. The image was left unchanged.";
+}
+
+function downloadCurrentCanvas() {
+  if (!state.redactionApplied || !state.originalImage) return;
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      showError("The redacted image could not be created. Try redacting again.");
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const baseName = state.imageName.replace(/\.[^.]+$/, "") || "ghost-reader";
+    anchor.href = url;
+    anchor.download = `${baseName}-redacted.png`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    status.textContent = "Redacted PNG downloaded.";
+  }, "image/png");
+}
+
+function loadFile(file) {
+  clearError();
+  const error = validateFile(file);
+  if (error) {
+    showError(error);
+    return;
+  }
+
+  if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
+  state.currentObjectUrl = URL.createObjectURL(file);
+  state.imageName = file.name;
+  state.ocrData = null;
+  state.findings = [];
+  state.selectedFindings = [];
+  state.redactionApplied = false;
+  downloadBtn.hidden = true;
+  results.hidden = true;
+
+  const image = new Image();
+  image.onload = () => {
+    state.originalImage = image;
+    drawImage(image);
+    scanBtn.disabled = false;
+    status.textContent = `${file.name} loaded. Ready to scan.`;
+  };
+  image.onerror = () => {
+    state.originalImage = null;
+    scanBtn.disabled = true;
+    showError("The image could not be decoded. Try opening it locally and saving it as PNG or JPG.");
+    status.textContent = "Image load failed.";
+  };
+  image.src = state.currentObjectUrl;
+}
+
 async function scanImage() {
   if (!state.originalImage) return;
-
   clearError();
   scanBtn.disabled = true;
   progressWrap.hidden = false;
   results.hidden = true;
+  state.redactionApplied = false;
+  state.selectedFindings = [];
   setProgress(0, "Preparing OCR…");
   status.textContent = "Scanning locally with Tesseract.js…";
 
@@ -213,7 +306,6 @@ async function scanImage() {
     console.log("Ghost Reader OCR word boxes:", result.data.words);
 
     setProgress(100, "OCR complete");
-    status.textContent = "OCR complete. Checking for sensitive information…";
     window.dispatchEvent(new CustomEvent("ghostreader:ocr-complete", { detail: result.data }));
   } catch (error) {
     console.error("Ghost Reader OCR failure:", error);
@@ -278,39 +370,11 @@ dropZone.addEventListener("drop", (event) => {
 });
 
 scanBtn.addEventListener("click", scanImage);
+redactBtn.addEventListener("click", redactSelected);
+downloadBtn.addEventListener("click", downloadCurrentCanvas);
 
 window.addEventListener("resize", () => {
-  if (state.originalImage) drawImage(state.originalImage);
+  if (!state.originalImage) return;
+  if (state.redactionApplied) drawRedactions(state.selectedFindings);
+  else drawImage(state.originalImage);
 });
-
-function loadFile(file) {
-  clearError();
-  const error = validateFile(file);
-  if (error) {
-    showError(error);
-    return;
-  }
-
-  if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
-  state.currentObjectUrl = URL.createObjectURL(file);
-  state.imageName = file.name;
-  state.ocrData = null;
-  state.findings = [];
-  state.redactionApplied = false;
-
-  const image = new Image();
-  image.onload = () => {
-    state.originalImage = image;
-    drawImage(image);
-    scanBtn.disabled = false;
-    status.textContent = `${file.name} loaded. Ready to scan.`;
-    results.hidden = true;
-  };
-  image.onerror = () => {
-    state.originalImage = null;
-    scanBtn.disabled = true;
-    showError("The image could not be decoded. Try opening it locally and saving it as PNG or JPG.");
-    status.textContent = "Image load failed.";
-  };
-  image.src = state.currentObjectUrl;
-}
