@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ghost Reader — Screenshot leak scanner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div><h1>Ghost Reader</h1><p>Scan screenshots. Black out what should stay private.</p></div>
+      <div class="privacy-note">LOCAL ONLY<br><span>Your image stays in this browser.</span></div>
+    </header>
+    <section class="workspace" aria-label="Ghost Reader workspace">
+      <div class="upload-panel" id="dropZone" tabindex="0">
+        <div class="document-motif" aria-hidden="true"><span></span><span></span><i></i></div>
+        <h2>Drop a screenshot here</h2>
+        <p>PNG, JPG, JPEG or WebP · up to 15 MB</p>
+        <button id="chooseBtn" type="button">Choose file</button>
+        <input id="fileInput" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
+        <p id="fileError" class="error" role="alert" hidden></p>
+      </div>
+      <div class="canvas-panel">
+        <canvas id="canvas" aria-label="Uploaded image preview"></canvas>
+        <div id="canvasPlaceholder" class="canvas-placeholder">Your document preview will appear here.</div>
+      </div>
+    </section>
+    <section class="controls" aria-label="Scan controls">
+      <button id="scanBtn" class="primary" type="button" disabled>Scan for leaks</button>
+      <div id="progressWrap" hidden><div class="progress-label"><span id="progressText">Preparing OCR…</span><span id="progressPercent">0%</span></div><progress id="progress" max="100" value="0">0%</progress></div>
+      <p id="status" class="status" role="status">Load an image to begin.</p>
+    </section>
+    <section id="results" class="results" hidden>
+      <div class="results-head"><div><h2>Findings</h2><p>Choose exactly what should be redacted.</p></div><button id="redactBtn" type="button">Redact selected</button></div>
+      <div id="resultsList"></div>
+      <div id="emptyState" class="empty" hidden>No leaks detected — but always double-check faces, names, and screenshots of private chats manually.</div>
+      <button id="downloadBtn" class="download" type="button" hidden>Download redacted image</button>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="detectors.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
