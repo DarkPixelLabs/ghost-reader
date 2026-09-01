@@ -15,13 +15,18 @@ const progressWrap = document.getElementById("progressWrap");
 const progress = document.getElementById("progress");
 const progressText = document.getElementById("progressText");
 const progressPercent = document.getElementById("progressPercent");
+const results = document.getElementById("results");
+const resultsList = document.getElementById("resultsList");
+const emptyState = document.getElementById("emptyState");
+const redactBtn = document.getElementById("redactBtn");
 
 const state = window.ghostReader = window.ghostReader || {
   originalImage: null,
   currentObjectUrl: null,
   ocrData: null,
   findings: [],
-  imageName: ""
+  imageName: "",
+  redactionApplied: false
 };
 
 function showError(message) {
@@ -59,34 +64,87 @@ function drawImage(image) {
   canvasPlaceholder.hidden = true;
 }
 
-function loadFile(file) {
-  clearError();
-  const error = validateFile(file);
-  if (error) {
-    showError(error);
+function highlightFinding(finding) {
+  if (!state.originalImage || !finding?.boxes?.length) return;
+  drawImage(state.originalImage);
+  const scaleX = canvas.width / state.originalImage.naturalWidth;
+  const scaleY = canvas.height / state.originalImage.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "rgba(193, 68, 60, 0.22)";
+  ctx.strokeStyle = "#c1443c";
+  ctx.lineWidth = 2;
+  for (const box of finding.boxes) {
+    const x = box.x0 * scaleX;
+    const y = box.y0 * scaleY;
+    const width = Math.max(2, (box.x1 - box.x0) * scaleX);
+    const height = Math.max(2, (box.y1 - box.y0) * scaleY);
+    ctx.fillRect(x, y, width, height);
+    ctx.strokeRect(x, y, width, height);
+  }
+  window.clearTimeout(state.highlightTimer);
+  state.highlightTimer = window.setTimeout(() => drawImage(state.originalImage), 1400);
+}
+
+function truncateMatch(value, maxLength = 64) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1)}…`;
+}
+
+function renderResults() {
+  results.hidden = false;
+  resultsList.replaceChildren();
+
+  if (!state.findings.length) {
+    emptyState.hidden = false;
+    redactBtn.disabled = true;
     return;
   }
 
-  if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
-  state.currentObjectUrl = URL.createObjectURL(file);
-  state.imageName = file.name;
-  state.ocrData = null;
-  state.findings = [];
+  emptyState.hidden = true;
+  redactBtn.disabled = false;
+  const groups = new Map();
+  for (const finding of state.findings) {
+    if (!groups.has(finding.type)) groups.set(finding.type, []);
+    groups.get(finding.type).push(finding);
+  }
 
-  const image = new Image();
-  image.onload = () => {
-    state.originalImage = image;
-    drawImage(image);
-    scanBtn.disabled = false;
-    status.textContent = `${file.name} loaded. Ready to scan.`;
-  };
-  image.onerror = () => {
-    state.originalImage = null;
-    scanBtn.disabled = true;
-    showError("The image could not be decoded. Try opening it locally and saving it as PNG or JPG.");
-    status.textContent = "Image load failed.";
-  };
-  image.src = state.currentObjectUrl;
+  let findingIndex = 0;
+  for (const [type, findings] of groups) {
+    const group = document.createElement("section");
+    group.className = "finding-group";
+    const heading = document.createElement("h3");
+    heading.textContent = `${findings[0].label} · ${findings.length}`;
+    group.appendChild(heading);
+
+    for (const finding of findings) {
+      const row = document.createElement("div");
+      row.className = "finding";
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = true;
+      checkbox.id = `finding-${findingIndex}`;
+      checkbox.dataset.findingIndex = String(state.findings.indexOf(finding));
+      checkbox.setAttribute("aria-label", `Redact ${finding.label}: ${finding.text}`);
+
+      const label = document.createElement("label");
+      label.className = "match";
+      label.htmlFor = checkbox.id;
+      label.textContent = truncateMatch(finding.text);
+      label.title = finding.text;
+
+      const locate = document.createElement("button");
+      locate.type = "button";
+      locate.className = "locate";
+      locate.textContent = "Locate";
+      locate.addEventListener("click", () => highlightFinding(finding));
+
+      row.append(checkbox, label, locate);
+      group.appendChild(row);
+      findingIndex += 1;
+    }
+    resultsList.appendChild(group);
+  }
 }
 
 function setProgress(value, label) {
@@ -101,11 +159,11 @@ function mapDetectionsToWordBoxes(ocrData, findings) {
   const words = Array.isArray(ocrData?.words) ? ocrData.words : [];
   const spans = [];
   let cursor = 0;
+  const lowerText = text.toLowerCase();
 
   for (const word of words) {
     const value = String(word.text || "").trim();
     if (!value) continue;
-    const lowerText = text.toLowerCase();
     const lowerValue = value.toLowerCase();
     let start = lowerText.indexOf(lowerValue, cursor);
 
@@ -122,13 +180,10 @@ function mapDetectionsToWordBoxes(ocrData, findings) {
     cursor = end;
   }
 
-  return findings.map((finding) => {
-    const matchedWords = spans.filter((span) => span.start < finding.end && span.end > finding.start);
-    return {
-      ...finding,
-      boxes: matchedWords.map((word) => word.bbox).filter(Boolean)
-    };
-  });
+  return findings.map((finding) => ({
+    ...finding,
+    boxes: spans.filter((span) => span.start < finding.end && span.end > finding.start).map((span) => span.bbox).filter(Boolean)
+  }));
 }
 
 async function scanImage() {
@@ -137,6 +192,7 @@ async function scanImage() {
   clearError();
   scanBtn.disabled = true;
   progressWrap.hidden = false;
+  results.hidden = true;
   setProgress(0, "Preparing OCR…");
   status.textContent = "Scanning locally with Tesseract.js…";
 
@@ -153,7 +209,6 @@ async function scanImage() {
 
     const result = await worker.recognize(state.originalImage);
     state.ocrData = result.data;
-
     console.log("Ghost Reader OCR text:", result.data.text);
     console.log("Ghost Reader OCR word boxes:", result.data.words);
 
@@ -175,7 +230,10 @@ window.addEventListener("ghostreader:ocr-complete", (event) => {
   if (!window.GhostReaderDetectors) return;
   const detections = window.GhostReaderDetectors.detectSensitiveInfo(event.detail.text || "");
   state.findings = mapDetectionsToWordBoxes(event.detail, detections);
-  status.textContent = `${state.findings.length} potential leak${state.findings.length === 1 ? "" : "s"} detected. Review the findings below.`;
+  renderResults();
+  status.textContent = state.findings.length
+    ? `${state.findings.length} potential leak${state.findings.length === 1 ? "" : "s"} detected. Review the findings below.`
+    : "No leaks detected — but always double-check faces, names, and screenshots of private chats manually.";
   window.dispatchEvent(new CustomEvent("ghostreader:detections-complete", { detail: state.findings }));
 });
 
@@ -224,3 +282,35 @@ scanBtn.addEventListener("click", scanImage);
 window.addEventListener("resize", () => {
   if (state.originalImage) drawImage(state.originalImage);
 });
+
+function loadFile(file) {
+  clearError();
+  const error = validateFile(file);
+  if (error) {
+    showError(error);
+    return;
+  }
+
+  if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
+  state.currentObjectUrl = URL.createObjectURL(file);
+  state.imageName = file.name;
+  state.ocrData = null;
+  state.findings = [];
+  state.redactionApplied = false;
+
+  const image = new Image();
+  image.onload = () => {
+    state.originalImage = image;
+    drawImage(image);
+    scanBtn.disabled = false;
+    status.textContent = `${file.name} loaded. Ready to scan.`;
+    results.hidden = true;
+  };
+  image.onerror = () => {
+    state.originalImage = null;
+    scanBtn.disabled = true;
+    showError("The image could not be decoded. Try opening it locally and saving it as PNG or JPG.");
+    status.textContent = "Image load failed.";
+  };
+  image.src = state.currentObjectUrl;
+}
