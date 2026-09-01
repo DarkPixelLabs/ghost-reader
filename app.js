@@ -137,7 +137,7 @@ function renderResults() {
     const group = document.createElement("section");
     group.className = "finding-group";
     const heading = document.createElement("h3");
-    heading.textContent = `${entries[0].finding.label}: ${entries.length}`;
+    heading.textContent = `${entries[0].finding.label} · ${entries.length}`;
     group.appendChild(heading);
 
     for (const { finding, index } of entries) {
