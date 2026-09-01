@@ -11,9 +11,18 @@ const canvas = document.getElementById("canvas");
 const canvasPlaceholder = document.getElementById("canvasPlaceholder");
 const scanBtn = document.getElementById("scanBtn");
 const status = document.getElementById("status");
+const progressWrap = document.getElementById("progressWrap");
+const progress = document.getElementById("progress");
+const progressText = document.getElementById("progressText");
+const progressPercent = document.getElementById("progressPercent");
 
-let originalImage = null;
-let currentObjectUrl = null;
+const state = window.ghostReader = window.ghostReader || {
+  originalImage: null,
+  currentObjectUrl: null,
+  ocrData: null,
+  findings: [],
+  imageName: ""
+};
 
 function showError(message) {
   fileError.textContent = message;
@@ -58,23 +67,73 @@ function loadFile(file) {
     return;
   }
 
-  if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-  currentObjectUrl = URL.createObjectURL(file);
+  if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
+  state.currentObjectUrl = URL.createObjectURL(file);
+  state.imageName = file.name;
+  state.ocrData = null;
+  state.findings = [];
 
   const image = new Image();
   image.onload = () => {
-    originalImage = image;
+    state.originalImage = image;
     drawImage(image);
     scanBtn.disabled = false;
     status.textContent = `${file.name} loaded. Ready to scan.`;
   };
   image.onerror = () => {
-    originalImage = null;
+    state.originalImage = null;
     scanBtn.disabled = true;
     showError("The image could not be decoded. Try opening it locally and saving it as PNG or JPG.");
     status.textContent = "Image load failed.";
   };
-  image.src = currentObjectUrl;
+  image.src = state.currentObjectUrl;
+}
+
+function setProgress(value, label) {
+  const percent = Math.max(0, Math.min(100, Math.round(value)));
+  progress.value = percent;
+  progressPercent.textContent = `${percent}%`;
+  progressText.textContent = label;
+}
+
+async function scanImage() {
+  if (!state.originalImage) return;
+
+  clearError();
+  scanBtn.disabled = true;
+  progressWrap.hidden = false;
+  setProgress(0, "Preparing OCR…");
+  status.textContent = "Scanning locally with Tesseract.js…";
+
+  let worker;
+  try {
+    worker = await Tesseract.createWorker("eng", 1, {
+      logger: (message) => {
+        if (typeof message.progress === "number") {
+          const label = message.status ? message.status.replace(/_/g, " ") : "Processing OCR";
+          setProgress(message.progress * 100, label);
+        }
+      }
+    });
+
+    const result = await worker.recognize(state.originalImage);
+    state.ocrData = result.data;
+
+    console.log("Ghost Reader OCR text:", result.data.text);
+    console.log("Ghost Reader OCR word boxes:", result.data.words);
+
+    setProgress(100, "OCR complete");
+    status.textContent = "OCR complete. Checking for sensitive information…";
+    window.dispatchEvent(new CustomEvent("ghostreader:ocr-complete", { detail: result.data }));
+  } catch (error) {
+    console.error("Ghost Reader OCR failure:", error);
+    showError("OCR could not complete. Check your internet connection so Tesseract.js can load its worker and language data, then try again.");
+    status.textContent = "OCR failed. No image data was uploaded by Ghost Reader.";
+    progressWrap.hidden = true;
+  } finally {
+    if (worker) await worker.terminate();
+    scanBtn.disabled = false;
+  }
 }
 
 chooseBtn.addEventListener("click", (event) => {
@@ -117,6 +176,8 @@ dropZone.addEventListener("drop", (event) => {
   loadFile(file);
 });
 
+scanBtn.addEventListener("click", scanImage);
+
 window.addEventListener("resize", () => {
-  if (originalImage) drawImage(originalImage);
+  if (state.originalImage) drawImage(state.originalImage);
 });
