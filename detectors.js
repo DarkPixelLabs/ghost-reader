@@ -11,7 +11,7 @@ const DETECTOR_CONFIG = {
     genericRegex: /\b[A-Za-z0-9]{20,}\b/g
   },
   ipv4: { label: "IPv4 address", regex: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g },
-  creditCard: { label: "Credit card", regex: /(?:\d[ -]?){13,19}/g },
+  creditCard: { label: "Credit card", regex: /(?:\d[ -]?){12,18}\d/g },
   crypto: {
     label: "Crypto wallet",
     bitcoinRegex: /(?:bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})/g,
@@ -19,16 +19,25 @@ const DETECTOR_CONFIG = {
   }
 };
 
+const DETECTOR_PRIORITY = { email: 100, apiKey: 95, crypto: 90, creditCard: 80, phone: 70, ipv4: 60 };
+
 function makeFinding(type, match, index) {
   return { type, label: DETECTOR_CONFIG[type].label, text: match, start: index, end: index + match.length };
 }
 
-function detectEmails(text) {
-  return collectMatches(text, DETECTOR_CONFIG.email.regex, "email");
+function collectMatches(text, regex, type) {
+  const findings = [];
+  const matcher = new RegExp(regex.source, "g");
+  let match;
+  while ((match = matcher.exec(text))) {
+    findings.push(makeFinding(type, match[0], match.index));
+    if (match[0] === "") matcher.lastIndex += 1;
+  }
+  return findings;
 }
 
-function normalizePhoneDigits(value) {
-  return value.replace(/\D/g, "");
+function detectEmails(text) {
+  return collectMatches(text, DETECTOR_CONFIG.email.regex, "email");
 }
 
 function detectPhones(text) {
@@ -36,9 +45,10 @@ function detectPhones(text) {
   const regex = new RegExp(DETECTOR_CONFIG.phone.regex.source, "g");
   let match;
   while ((match = regex.exec(text))) {
-    const digits = normalizePhoneDigits(match[0]);
-    const startsLikeNumber = /^[+()\d]/.test(match[0]);
-    if (startsLikeNumber && digits.length >= 10 && digits.length <= 15) {
+    const digits = match[0].replace(/\D/g, "");
+    const before = text.slice(0, match.index).match(/[\d][ -.\s]?$/);
+    const after = text.slice(match.index + match[0].length).match(/^[ -.\s]?[\d]/);
+    if (/^[+()\d]/.test(match[0]) && digits.length >= 10 && digits.length <= 15 && !before && !after) {
       findings.push(makeFinding("phone", match[0], match.index));
     }
   }
@@ -46,14 +56,13 @@ function detectPhones(text) {
 }
 
 function detectApiKeys(text) {
-  const findings = [
-    ...collectMatches(text, DETECTOR_CONFIG.apiKey.prefixRegex, "apiKey")
-  ];
-  const generic = collectMatches(text, DETECTOR_CONFIG.apiKey.genericRegex, "apiKey").filter((finding) => {
+  const prefixFindings = collectMatches(text, DETECTOR_CONFIG.apiKey.prefixRegex, "apiKey");
+  const genericFindings = collectMatches(text, DETECTOR_CONFIG.apiKey.genericRegex, "apiKey").filter((finding) => {
     const value = finding.text;
-    return /[A-Za-z]/.test(value) && /\d/.test(value);
+    const isWallet = /(?:bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|0x[a-fA-F0-9]{40})/.test(value);
+    return /[A-Za-z]/.test(value) && /\d/.test(value) && !isWallet && !/^0x/i.test(value);
   });
-  return dedupeFindings([...findings, ...generic]);
+  return dedupeFindings([...prefixFindings, ...genericFindings]);
 }
 
 function isValidIpv4(value) {
@@ -93,17 +102,6 @@ function detectCryptoWallets(text) {
   ];
 }
 
-function collectMatches(text, regex, type) {
-  const findings = [];
-  const matcher = new RegExp(regex.source, "g");
-  let match;
-  while ((match = matcher.exec(text))) {
-    findings.push(makeFinding(type, match[0], match.index));
-    if (match[0] === "") matcher.lastIndex += 1;
-  }
-  return findings;
-}
-
 function dedupeFindings(findings) {
   const seen = new Set();
   return findings.filter((finding) => {
@@ -114,17 +112,31 @@ function dedupeFindings(findings) {
   });
 }
 
+function resolveOverlaps(findings) {
+  const ranked = [...findings].sort((a, b) => {
+    const priorityDelta = DETECTOR_PRIORITY[b.type] - DETECTOR_PRIORITY[a.type];
+    if (priorityDelta) return priorityDelta;
+    return (b.end - b.start) - (a.end - a.start);
+  });
+  const kept = [];
+  for (const finding of ranked) {
+    const overlaps = kept.some((existing) => finding.start < existing.end && existing.start < finding.end);
+    if (!overlaps) kept.push(finding);
+  }
+  return kept.sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
 function detectSensitiveInfo(text) {
   if (typeof text !== "string" || !text.trim()) return [];
 
-  return dedupeFindings([
+  return resolveOverlaps(dedupeFindings([
     ...detectEmails(text),
     ...detectPhones(text),
     ...detectApiKeys(text),
     ...detectIpv4(text),
     ...detectCreditCards(text),
     ...detectCryptoWallets(text)
-  ]).sort((a, b) => a.start - b.start || a.end - b.end);
+  ]));
 }
 
 function runDetectorSelfTest() {
@@ -138,8 +150,8 @@ function runDetectorSelfTest() {
     "ETH 0x52908400098527886E0F7030069857D2E4169EE7"
   ].join(" | ");
   const findings = detectSensitiveInfo(sample);
-  const expected = ["email", "phone", "apiKey", "ipv4", "creditCard", "crypto"];
-  const passed = expected.every((type) => findings.some((finding) => finding.type === type));
+  const expectedCounts = { email: 1, phone: 1, apiKey: 1, ipv4: 1, creditCard: 1, crypto: 2 };
+  const passed = Object.entries(expectedCounts).every(([type, count]) => findings.filter((finding) => finding.type === type).length === count);
   console.assert(passed, "Ghost Reader detector self-test failed", findings);
   return passed;
 }
